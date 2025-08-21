@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8" />
+<title>俄罗斯方块 Deluxe</title>
+<style>
+/* ---- 基础布局 ---- */
+body{
+    margin:0;overflow:hidden;font-family:'Segoe UI',sans-serif;
+    background:linear-gradient(120deg,#1e3c72,#2a5298);color:#fff;
+    display:flex;align-items:center;justify-content:center;height:100vh;
+}
+#ui{position:absolute;top:10px;left:10px;z-index:10;}
+#ui button{margin:2px;padding:4px 8px;}
+#stats{margin-top:10px;font-size:14px;}
+
+/* ---- 游戏区域 ---- */
+#game{display:flex;gap:10px;}
+.canvasWrap{position:relative;width:300px;height:600px;
+    background:rgba(255,255,255,0.1);box-shadow:0 4px 20px rgba(0,0,0,0.3);
+    border-radius:8px;backdrop-filter:blur(5px);}
+canvas{display:block;}
+
+/* ---- 侧边 ---- */
+#side{display:flex;flex-direction:column;gap:10px;}
+.sideCanvas{background:rgba(0,0,0,0.2);border-radius:6px;}
+
+/* ---- 主题 ---- */
+.theme-neon body{background:radial-gradient(#0f0,#000);}
+.theme-retro body{background:linear-gradient(45deg,#f57,#58f);}
+
+/* ---- 动画 ---- */
+@keyframes flash{0%{opacity:1;}50%{opacity:0;}100%{opacity:1;}}
+.line-clear{animation:flash 0.3s ease-in-out 2;}
+
+</style>
+</head>
+<body>
+<div id="ui">
+    <div id="menu">
+        <button id="startClassic">经典模式</button>
+        <button id="startTime">限时模式</button>
+        <button id="startChallenge">挑战模式</button>
+        <button id="startZen">禅模式</button>
+        <button id="pauseBtn">暂停</button>
+        <button id="themeBtn">切换主题</button>
+    </div>
+    <div id="stats">
+        分数:<span id="score">0</span> 等级:<span id="level">1</span>
+        行:<span id="lines">0</span> 时间:<span id="time">0</span>
+        <div>连击:<span id="combo">0</span></div>
+    </div>
+    <div id="skills">
+        炸弹:<span id="bombCnt">1</span>
+        激光:<span id="laserCnt">1</span>
+        时间暂停:<span id="timeCnt">1</span>
+    </div>
+    <div id="volume">
+        <label>BGM<input id="bgmVol" type="range" min="0" max="1" step="0.01" value="0.5"/></label>
+        <label>SFX<input id="sfxVol" type="range" min="0" max="1" step="0.01" value="0.7"/></label>
+    </div>
+</div>
+<div id="game">
+    <div id="side">
+        <canvas id="hold" class="sideCanvas" width="80" height="80"></canvas>
+        <canvas id="next1" class="sideCanvas" width="80" height="80"></canvas>
+        <canvas id="next2" class="sideCanvas" width="80" height="80"></canvas>
+    </div>
+    <div class="canvasWrap">
+        <canvas id="board" width="300" height="600"></canvas>
+        <canvas id="effects" width="300" height="600" style="position:absolute;left:0;top:0;pointer-events:none;"></canvas>
+    </div>
+</div>
+<script>
+'use strict';
+/* ===================== 工具函数 ===================== */
+const COLS=10,ROWS=20,BLOCK=30; // block size
+const TETROMINOES={
+    I:[[[0,0,0,0],[1,1,1,1],[0,0,0,0],[0,0,0,0]],
+       [[0,0,1,0],[0,0,1,0],[0,0,1,0],[0,0,1,0]]],
+    J:[[[1,0,0],[1,1,1],[0,0,0]],
+       [[0,1,1],[0,1,0],[0,1,0]],
+       [[0,0,0],[1,1,1],[0,0,1]],
+       [[0,1,0],[0,1,0],[1,1,0]]],
+    L:[[[0,0,1],[1,1,1],[0,0,0]],
+       [[0,1,0],[0,1,0],[0,1,1]],
+       [[0,0,0],[1,1,1],[1,0,0]],
+       [[1,1,0],[0,1,0],[0,1,0]]],
+    O:[[[1,1],[1,1]]],
+    S:[[[0,1,1],[1,1,0],[0,0,0]],
+       [[0,1,0],[0,1,1],[0,0,1]]],
+    Z:[[[1,1,0],[0,1,1],[0,0,0]],
+       [[0,0,1],[0,1,1],[0,1,0]]],
+    T:[[[0,1,0],[1,1,1],[0,0,0]],
+       [[0,1,0],[0,1,1],[0,1,0]],
+       [[0,0,0],[1,1,1],[0,1,0]],
+       [[0,1,0],[1,1,0],[0,1,0]]],
+    B:[[[1]]], // bomb
+};
+const COLORS={I:'#00f0f0',J:'#0000f0',L:'#f0a000',O:'#f0f000',S:'#00f000',Z:'#f00000',T:'#a000f0',B:'#ff0'};
+const SFX={}; // will be filled later
+
+function createMatrix(w,h){const m=[];while(h--)m.push(new Array(w).fill(0));return m;}
+function rotate(matrix){return matrix[0].map((_,i)=>matrix.map(row=>row[i]).reverse());}
+function randomBag(){
+    const types=['I','J','L','O','S','Z','T'];
+    for(let i=types.length-1;i>0;i--){const j=Math.floor(Math.random()* (i+1));[types[i],types[j]]=[types[j],types[i]];}
+    return types;
+}
+
+/* ===================== 类定义 ===================== */
+class Piece{
+    constructor(type){
+        this.type=type;this.rot=0;this.matrix=TETROMINOES[type][0];
+        this.pos={x:3,y:0};
+    }
+    rotate(dir){
+        const m=TETROMINOES[this.type];
+        this.rot=(this.rot+dir+ m.length)%m.length;
+        this.matrix=m[this.rot];
+    }
+}
+
+class Board{
+    constructor(){this.grid=createMatrix(COLS,ROWS);}
+    reset(){this.grid=createMatrix(COLS,ROWS);}
+    inside(x,y){return x>=0&&x<COLS&&y<ROWS;}
+    collision(piece){
+        for(let y=0;y<piece.matrix.length;y++){
+            for(let x=0;x<piece.matrix[y].length;x++){
+                if(piece.matrix[y][x] && (!this.inside(x+piece.pos.x,y+piece.pos.y) || this.grid[y+piece.pos.y][x+piece.pos.x]))
+                    return true;
+            }
+        }
+        return false;
+    }
+    merge(piece){
+        for(let y=0;y<piece.matrix.length;y++){
+            for(let x=0;x<piece.matrix[y].length;x++){
+                if(piece.matrix[y][x])
+                    this.grid[y+piece.pos.y][x+piece.pos.x]=piece.type;
+            }
+        }
+    }
+    clearLines(){
+        let lines=0;
+        outer:for(let y=this.grid.length-1;y>=0;y--){
+            for(let x=0;x<COLS;x++) if(!this.grid[y][x]) continue outer;
+            const row=this.grid.splice(y,1)[0].fill(0);this.grid.unshift(row);lines++;y++;
+        }
+        return lines;
+    }
+}
+
+class AudioManager{
+    constructor(){
+        this.ctx=new (window.AudioContext||window.webkitAudioContext)();
+        this.master=this.ctx.createGain();this.master.connect(this.ctx.destination);
+        this.musicGain=this.ctx.createGain();this.musicGain.connect(this.master);
+        this.sfxGain=this.ctx.createGain();this.sfxGain.connect(this.master);
+        this.music=null;this.initBGM();
+    }
+    initBGM(){
+        const osc=this.ctx.createOscillator();
+        const gain=this.ctx.createGain();
+        osc.type='square';osc.frequency.value=220;
+        gain.gain.value=0.05;osc.connect(gain).connect(this.musicGain);osc.start();
+        this.music=osc;
+    }
+    setBGMVol(v){this.musicGain.gain.value=v;}
+    setSFXVol(v){this.sfxGain.gain.value=v;}
+    beep(freq, time=0.1){
+        const osc=this.ctx.createOscillator();const gain=this.ctx.createGain();
+        osc.frequency.value=freq;osc.connect(gain);gain.connect(this.sfxGain);
+        osc.start();osc.stop(this.ctx.currentTime+time);gain.gain.setValueAtTime(0.2,this.ctx.currentTime);gain.gain.exponentialRampToValueAtTime(0.01,this.ctx.currentTime+time);
+    }
+}
+
+/* ===================== 游戏主逻辑 ===================== */
+class Game{
+    constructor(){
+        this.canvas=document.getElementById('board');
+        this.ctx=this.canvas.getContext('2d');
+        this.effects=document.getElementById('effects').getContext('2d');
+        this.holdCtx=document.getElementById('hold').getContext('2d');
+        this.nextCtx1=document.getElementById('next1').getContext('2d');
+        this.nextCtx2=document.getElementById('next2').getContext('2d');
+        this.board=new Board();
+        this.audio=new AudioManager();
+        this.reset();
+        this.addEvents();
+    }
+    reset(){
+        this.board.reset();
+        this.queue=randomBag();
+        this.queue.push(...randomBag());
+        this.piece=this.nextPiece();
+        this.next1=this.nextPiece();this.next2=this.nextPiece();
+        this.hold=null;this.holdUsed=false;
+        this.dropCounter=0;this.dropInterval=1000;
+        this.lastTime=0;this.score=0;this.lines=0;this.level=1;this.combo=0;this.startTime=Date.now();
+        this.bomb=1;this.laser=1;this.timeStop=1;
+        this.paused=false;this.over=false;
+    }
+    addEvents(){
+        document.addEventListener('keydown',e=>{
+            if(this.paused||this.over) return;
+            switch(e.code){
+                case 'ArrowLeft':this.move(-1);break;
+                case 'ArrowRight':this.move(1);break;
+                case 'ArrowDown':this.drop();break;
+                case 'ArrowUp':this.rotate(1);break;
+                case 'Space':this.hardDrop();break;
+                case 'ShiftLeft':case 'ShiftRight':this.holdPiece();break;
+                case 'Digit1':if(this.bomb>0){this.useBomb();}break;
+                case 'Digit2':if(this.laser>0){this.useLaser();}break;
+                case 'Digit3':if(this.timeStop>0){this.useTimeStop();}break;
+            }
+        });
+    }
+    start(){
+        this.reset();
+        this.update();
+    }
+    nextPiece(){
+        if(this.queue.length==0) this.queue=randomBag();
+        return new Piece(this.queue.shift());
+    }
+    holdPiece(){
+        if(this.holdUsed) return;this.audio.beep(600);
+        if(this.hold){[this.hold,this.piece]=[this.piece,this.hold];this.piece.pos={x:3,y:0};}
+        else{this.hold=this.piece;this.piece=this.next1;this.next1=this.next2;this.next2=this.nextPiece();}
+        this.holdUsed=true;
+    }
+    move(dir){this.piece.pos.x+=dir;if(this.board.collision(this.piece))this.piece.pos.x-=dir;}
+    rotate(dir){const rot=this.piece.rot;this.piece.rotate(dir);if(this.board.collision(this.piece)){this.piece.rotate(-dir);}else this.audio.beep(700);}
+    drop(){this.piece.pos.y++;if(this.board.collision(this.piece)){this.piece.pos.y--;this.lock();}}
+    hardDrop(){while(!this.board.collision(this.piece))this.piece.pos.y++;this.piece.pos.y--;this.lock();this.audio.beep(800);}
+    lock(){
+        if(this.piece.type==='B'){ // bomb special
+            for(let y=-1;y<=1;y++)for(let x=-1;x<=1;x++){
+                const rx=this.piece.pos.x+x,ry=this.piece.pos.y+y;
+                if(rx>=0&&rx<COLS&&ry>=0&&ry<ROWS)this.board.grid[ry][rx]=0;
+            }
+        }else{
+            this.board.merge(this.piece);
+        }
+        const cleared=this.board.clearLines();
+        if(cleared){
+            this.score+=cleared*100*this.level;this.lines+=cleared;
+            this.combo++;this.audio.beep(900);
+            if(this.combo>1) this.score+=this.combo*50; // combo bonus
+            if(cleared==4) this.laser++; // reward
+            if(this.lines>=this.level*10){this.level++;this.dropInterval=Math.max(100,this.dropInterval-100);}
+        }else this.combo=0;
+        this.piece=this.next1;this.next1=this.next2;this.next2=this.nextPiece();
+        this.holdUsed=false;
+        if(this.board.collision(this.piece)){this.over=true;saveStats(this.score,this.level,this.lines);alert('游戏结束');}
+    }
+    useBomb(){this.bomb--;this.piece=new Piece('B');this.piece.pos.x=4;}
+    useLaser(){this.laser--;const row=this.piece.pos.y+this.piece.matrix.length-1;for(let x=0;x<COLS;x++)this.board.grid[row][x]=0;this.audio.beep(1000);}
+    useTimeStop(){this.timeStop--;const prev=this.dropInterval;this.dropInterval=Infinity;setTimeout(()=>{this.dropInterval=prev;},3000);}
+    update(time=0){const delta=time-this.lastTime;this.lastTime=time;this.dropCounter+=delta;if(this.dropCounter>this.dropInterval){this.drop();this.dropCounter=0;}
+        this.draw();
+        if(!this.paused&&!this.over)requestAnimationFrame(t=>this.update(t));
+    }
+    draw(){
+        this.ctx.clearRect(0,0,this.canvas.width,this.canvas.height);
+        drawMatrix(this.ctx,this.board.grid,{x:0,y:0});
+        const ghostPos=this.ghost();
+        drawMatrix(this.ctx,this.piece.matrix,ghostPos,true);
+        drawMatrix(this.ctx,this.piece.matrix,this.piece.pos);
+        this.drawSide();
+        updateStats(this);
+    }
+    ghost(){const ghost={x:this.piece.pos.x,y:this.piece.pos.y};while(!this.board.collision({matrix:this.piece.matrix,pos:ghost,type:this.piece.type}))ghost.y++;ghost.y--;return ghost;}
+    drawSide(){
+        [this.holdCtx,this.nextCtx1,this.nextCtx2].forEach(c=>c.clearRect(0,0,80,80));
+        if(this.hold) drawMatrix(this.holdCtx,this.hold.matrix,{x:1,y:1});
+        drawMatrix(this.nextCtx1,this.next1.matrix,{x:1,y:1});
+        drawMatrix(this.nextCtx2,this.next2.matrix,{x:1,y:1});
+    }
+}
+
+function drawMatrix(ctx,matrix,offset,ghost=false){
+    matrix.forEach((row,y)=>row.forEach((v,x)=>{if(v){ctx.fillStyle=ghost?'rgba(255,255,255,0.3)':COLORS[v];ctx.fillRect((x+offset.x)*BLOCK,(y+offset.y)*BLOCK,BLOCK-1,BLOCK-1);}}));
+}
+
+/* ===================== 统计与存储 ===================== */
+function updateStats(g){
+    document.getElementById('score').textContent=g.score;
+    document.getElementById('level').textContent=g.level;
+    document.getElementById('lines').textContent=g.lines;
+    document.getElementById('time').textContent=((Date.now()-g.startTime)/1000|0);
+    document.getElementById('combo').textContent=g.combo;
+    document.getElementById('bombCnt').textContent=g.bomb;
+    document.getElementById('laserCnt').textContent=g.laser;
+    document.getElementById('timeCnt').textContent=g.timeStop;
+}
+function saveStats(score,level,lines){
+    const data=JSON.parse(localStorage.getItem('tetrisStats')||'{}');
+    data.highScore=Math.max(score,data.highScore||0);
+    data.bestLevel=Math.max(level,data.bestLevel||0);
+    data.totalLines=(data.totalLines||0)+lines;
+    localStorage.setItem('tetrisStats',JSON.stringify(data));
+}
+
+/* ===================== 控制 ===================== */
+const game=new Game();
+function startMode(mode){
+    game.start();
+    if(mode==='time'){setTimeout(()=>game.over=true,120000);} // 2 minutes
+    if(mode==='challenge'){for(let y=ROWS-4;y<ROWS;y++)for(let x=0;x<COLS;x++)if(Math.random()<0.3)game.board.grid[y][x]='X';}
+}
+
+document.getElementById('startClassic').onclick=()=>startMode('classic');
+
+document.getElementById('startTime').onclick=()=>startMode('time');
+
+document.getElementById('startChallenge').onclick=()=>startMode('challenge');
+
+document.getElementById('startZen').onclick=()=>startMode('zen');
+
+document.getElementById('pauseBtn').onclick=()=>{game.paused=!game.paused;if(!game.paused)game.update();};
+let themeIndex=0;const themes=['default','theme-neon','theme-retro'];
+document.getElementById('themeBtn').onclick=()=>{document.documentElement.className=themes[++themeIndex%themes.length];};
+
+document.getElementById('bgmVol').oninput=e=>game.audio.setBGMVol(e.target.value);
+document.getElementById('sfxVol').oninput=e=>game.audio.setSFXVol(e.target.value);
+
+</script>
+</body>
+</html>
